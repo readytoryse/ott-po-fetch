@@ -2,15 +2,14 @@
 
 namespace Tests\Feature\Console\Commands;
 
-use App\Mail\PoSyncIssuesDetected;
 use App\Services\ShopifyMetafieldSyncService;
 use Illuminate\Foundation\Testing\LazilyRefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Mail;
 use Mockery;
 use Psr\Log\LoggerInterface;
+use RuntimeException;
 use Tests\TestCase;
 
 class SyncPurchaseOrdersTest extends TestCase
@@ -19,7 +18,6 @@ class SyncPurchaseOrdersTest extends TestCase
 
     public function test_logs_only_lines_with_positive_outstanding_quantity(): void
     {
-        Mail::fake();
         $this->travelTo('2026-10-05 10:00:00');
         config([
             'services.orderwise.base_url' => 'https://orderwise.test/owapi',
@@ -63,14 +61,11 @@ class SyncPurchaseOrdersTest extends TestCase
         $this->assertDatabaseHas('po_lines', ['pol_id' => 19424, 'sku' => 'P1551', 'is_active' => true]);
         $this->assertDatabaseCount('po_line_changes', 1);
         $this->assertDatabaseCount('po_sync_issues', 0);
-        Mail::assertNothingSent();
     }
 
-    public function test_records_failed_runs_and_emails_the_error_when_orderwise_returns_an_error(): void
+    public function test_records_failed_runs_and_logs_the_error_when_orderwise_returns_an_error(): void
     {
-        Mail::fake();
         config([
-            'services.po_sync.mail_recipients' => ['dev@example.test'],
             'services.orderwise.base_url' => 'https://orderwise.test/owapi',
             'services.orderwise.username' => 'test-user',
             'services.orderwise.password' => 'test-password',
@@ -86,8 +81,13 @@ class SyncPurchaseOrdersTest extends TestCase
         ]);
 
         $logger = Mockery::mock(LoggerInterface::class);
-        $logger->shouldReceive('error')->once()->with('OrderWise PO export failed.', Mockery::type('array'));
-        Log::shouldReceive('channel')->once()->with('po_sync')->andReturn($logger);
+        $logger->shouldReceive('log')->once()->with('error', 'PO sync issue.', Mockery::on(
+            static fn (array $context): bool => $context['stage'] === 'orderwise_export'
+                && $context['sku'] === null
+                && is_int($context['run_id'])
+                && str_contains($context['message'], 'Export failed'),
+        ));
+        Log::shouldReceive('channel')->with('po_sync')->andReturn($logger);
 
         $this->artisan('orderwise:sync-po')
             ->expectsOutput('OrderWise PO export failed. Check the PO sync log.')
@@ -97,9 +97,49 @@ class SyncPurchaseOrdersTest extends TestCase
         $this->assertDatabaseCount('po_lines', 0);
         $this->assertDatabaseCount('po_line_changes', 0);
         $this->assertDatabaseHas('po_sync_issues', ['stage' => 'orderwise_export', 'severity' => 'error', 'sku' => null]);
-        Mail::assertSent(PoSyncIssuesDetected::class, fn (PoSyncIssuesDetected $mail): bool => $mail->hasTo('dev@example.test')
-            && count($mail->issues) === 1
-            && $mail->issues[0]->stage === 'orderwise_export');
+    }
+
+    public function test_records_and_logs_the_error_when_the_shopify_sync_throws(): void
+    {
+        $this->travelTo('2026-10-05 10:00:00');
+        config([
+            'services.orderwise.base_url' => 'https://orderwise.test/owapi',
+            'services.orderwise.username' => 'test-user',
+            'services.orderwise.password' => 'test-password',
+            'services.orderwise.export_id' => '49',
+            'services.orderwise.token_cache_minutes' => 55,
+            'services.orderwise.timeout_seconds' => 30,
+            'services.shopify.push_enabled' => true,
+        ]);
+
+        Http::preventStrayRequests();
+        Http::fake([
+            'https://orderwise.test/owapi/token/gettoken' => Http::response(['token' => 'test-token']),
+            'https://orderwise.test/owapi/system/export-definition/49' => Http::response([
+                ['po_line_id' => 19424, 'sku' => 'P1551', 'qty_outstanding' => 6],
+            ]),
+        ]);
+
+        $shopifySyncService = Mockery::mock(ShopifyMetafieldSyncService::class);
+        $shopifySyncService->shouldReceive('sync')->once()->andThrow(new RuntimeException('Shopify is unreachable.'));
+        $this->app->instance(ShopifyMetafieldSyncService::class, $shopifySyncService);
+
+        $logger = Mockery::mock(LoggerInterface::class);
+        $logger->shouldReceive('log')->once()->with('error', 'PO sync issue.', Mockery::on(
+            static fn (array $context): bool => $context['stage'] === 'shopify_sync'
+                && $context['message'] === 'Shopify is unreachable.',
+        ));
+        Log::shouldReceive('channel')->with('po_sync')->andReturn($logger);
+
+        $this->artisan('orderwise:sync-po')
+            ->expectsOutput('Shopify metafield sync failed. Check the PO sync log.')
+            ->assertFailed();
+
+        $this->assertDatabaseHas('po_sync_issues', [
+            'stage' => 'shopify_sync',
+            'severity' => 'error',
+            'message' => 'Shopify is unreachable.',
+        ]);
     }
 
     public function test_pushes_only_affected_skus_when_shopify_push_is_enabled(): void

@@ -2,8 +2,8 @@
 
 namespace App\Services;
 
-use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 class SyncIssueRecorder
 {
@@ -20,6 +20,8 @@ class SyncIssueRecorder
     public const STAGE_SHOPIFY_METAFIELD_UPDATE = 'shopify_metafield_update';
 
     /**
+     * Write the issue to the PO sync log, then store it in po_sync_issues.
+     *
      * @param  array<string, mixed>  $details
      */
     public function record(
@@ -31,6 +33,15 @@ class SyncIssueRecorder
         ?string $sku = null,
         ?string $variantGid = null,
     ): void {
+        Log::channel('po_sync')->log($severity, 'PO sync issue.', [
+            'run_id' => $runId,
+            'stage' => $stage,
+            'sku' => $sku,
+            'variant_gid' => $variantGid,
+            'message' => $message,
+            'details' => $details,
+        ]);
+
         $now = now();
 
         DB::table('po_sync_issues')->insert([
@@ -44,17 +55,5 @@ class SyncIssueRecorder
             'created_at' => $now,
             'updated_at' => $now,
         ]);
-    }
-
-    /**
-     * @return Collection<int, object{id: int, run_id: int|null, stage: string, severity: string, sku: string|null, variant_gid: string|null, message: string, details: string|null, created_at: string}>
-     */
-    public function errorsForRun(int $runId): Collection
-    {
-        return DB::table('po_sync_issues')
-            ->where('run_id', $runId)
-            ->where('severity', self::SEVERITY_ERROR)
-            ->orderBy('id')
-            ->get();
     }
 }

@@ -2,7 +2,6 @@
 
 namespace App\Console\Commands;
 
-use App\Mail\PoSyncIssuesDetected;
 use App\Services\OrderWiseClient;
 use App\Services\PurchaseOrderSyncService;
 use App\Services\ShopifyMetafieldSyncService;
@@ -12,8 +11,6 @@ use Illuminate\Console\Attributes\Signature;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Mail;
-use Psr\Log\LoggerInterface;
 use Throwable;
 
 #[Signature('orderwise:sync-po')]
@@ -52,11 +49,6 @@ class SyncPurchaseOrders extends Command
                 'updated_at' => now(),
             ]);
 
-            $logger->error('OrderWise PO export failed.', [
-                'run_id' => $runId,
-                'exception' => $exception::class,
-                'message' => $exception->getMessage(),
-            ]);
             $issueRecorder->record(
                 runId: $runId,
                 stage: SyncIssueRecorder::STAGE_ORDERWISE_EXPORT,
@@ -64,7 +56,6 @@ class SyncPurchaseOrders extends Command
                 message: $exception->getMessage(),
                 details: ['exception' => $exception::class, 'rows_fetched' => is_array($rows) ? count($rows) : 0],
             );
-            $this->sendIssueMail($runId, $issueRecorder, $logger);
             $this->error('OrderWise PO export failed. Check the PO sync log.');
 
             return self::FAILURE;
@@ -74,11 +65,6 @@ class SyncPurchaseOrders extends Command
             try {
                 $shopifyResult = $shopifySyncService->sync($affectedSkus, $runId);
             } catch (Throwable $exception) {
-                $logger->error('Shopify metafield sync failed.', [
-                    'run_id' => $runId,
-                    'exception' => $exception::class,
-                    'message' => $exception->getMessage(),
-                ]);
                 $issueRecorder->record(
                     runId: $runId,
                     stage: SyncIssueRecorder::STAGE_SHOPIFY_SYNC,
@@ -86,7 +72,6 @@ class SyncPurchaseOrders extends Command
                     message: $exception->getMessage(),
                     details: ['exception' => $exception::class],
                 );
-                $this->sendIssueMail($runId, $issueRecorder, $logger);
                 $this->error('Shopify metafield sync failed. Check the PO sync log.');
 
                 return self::FAILURE;
@@ -143,28 +128,6 @@ class SyncPurchaseOrders extends Command
             count($outstandingRows),
         ));
 
-        $this->sendIssueMail($runId, $issueRecorder, $logger);
-
         return $shopifyFailed ? self::FAILURE : self::SUCCESS;
-    }
-
-    private function sendIssueMail(int $runId, SyncIssueRecorder $issueRecorder, LoggerInterface $logger): void
-    {
-        $errors = $issueRecorder->errorsForRun($runId);
-        $recipients = config('services.po_sync.mail_recipients');
-
-        if ($errors->isEmpty() || $recipients === []) {
-            return;
-        }
-
-        try {
-            Mail::to($recipients)->send(new PoSyncIssuesDetected($runId, $errors->all()));
-        } catch (Throwable $exception) {
-            $logger->error('PO sync error email could not be sent.', [
-                'run_id' => $runId,
-                'exception' => $exception::class,
-                'message' => $exception->getMessage(),
-            ]);
-        }
     }
 }

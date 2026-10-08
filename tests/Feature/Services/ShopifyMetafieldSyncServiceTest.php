@@ -8,6 +8,9 @@ use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
+use Mockery;
+use Psr\Log\LoggerInterface;
 use Tests\TestCase;
 
 class ShopifyMetafieldSyncServiceTest extends TestCase
@@ -80,6 +83,13 @@ class ShopifyMetafieldSyncServiceTest extends TestCase
                 'data' => ['productVariants' => ['nodes' => []]],
             ]),
         ]);
+
+        $logger = Mockery::mock(LoggerInterface::class);
+        $logger->shouldReceive('log')->once()->with('warning', 'PO sync issue.', Mockery::on(
+            static fn (array $context): bool => $context['sku'] === 'SKU-NOT-IN-SHOPIFY'
+                && $context['message'] === 'No Shopify variant matches this SKU.',
+        ));
+        Log::shouldReceive('channel')->once()->with('po_sync')->andReturn($logger);
 
         $result = app(ShopifyMetafieldSyncService::class)->sync(['SKU-NOT-IN-SHOPIFY']);
 
@@ -237,6 +247,15 @@ class ShopifyMetafieldSyncServiceTest extends TestCase
                 ]]]]),
         ]);
 
+        $logger = Mockery::mock(LoggerInterface::class);
+        $logger->shouldReceive('log')->once()->with('error', 'PO sync issue.', Mockery::on(
+            static fn (array $context): bool => $context['run_id'] === $runId
+                && $context['stage'] === 'shopify_metafield_update'
+                && $context['sku'] === 'P1599'
+                && $context['message'] === 'Value is invalid JSON.',
+        ));
+        Log::shouldReceive('channel')->once()->with('po_sync')->andReturn($logger);
+
         $result = app(ShopifyMetafieldSyncService::class)->sync([], $runId);
 
         $this->assertSame(['P1599'], $result['failed_skus']);
@@ -308,6 +327,10 @@ class ShopifyMetafieldSyncServiceTest extends TestCase
                 'data' => ['productVariants' => ['nodes' => []]],
             ]),
         ]);
+
+        $logger = Mockery::mock(LoggerInterface::class);
+        $logger->shouldReceive('log')->once();
+        Log::shouldReceive('channel')->once()->with('po_sync')->andReturn($logger);
 
         $service = app(ShopifyMetafieldSyncService::class);
         $service->sync(['SKU-NOT-IN-SHOPIFY']);

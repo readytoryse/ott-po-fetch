@@ -5,6 +5,9 @@ namespace Tests\Feature\Services;
 use App\Services\SyncIssueRecorder;
 use Illuminate\Foundation\Testing\LazilyRefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Mockery;
+use Psr\Log\LoggerInterface;
 use Tests\TestCase;
 
 class SyncIssueRecorderTest extends TestCase
@@ -14,6 +17,9 @@ class SyncIssueRecorderTest extends TestCase
     public function test_stores_every_detail_of_a_recorded_issue(): void
     {
         $runId = $this->createRun();
+        $logger = Mockery::mock(LoggerInterface::class);
+        $logger->shouldReceive('log')->once();
+        Log::shouldReceive('channel')->once()->with('po_sync')->andReturn($logger);
 
         app(SyncIssueRecorder::class)->record(
             runId: $runId,
@@ -39,19 +45,41 @@ class SyncIssueRecorderTest extends TestCase
         );
     }
 
-    public function test_returns_only_the_errors_of_the_requested_run(): void
+    public function test_writes_every_recorded_issue_to_the_po_sync_log_at_its_severity(): void
     {
-        $recorder = app(SyncIssueRecorder::class);
         $runId = $this->createRun();
-        $otherRunId = $this->createRun();
+        $logger = Mockery::mock(LoggerInterface::class);
+        $logger->shouldReceive('log')->once()->with('error', 'PO sync issue.', [
+            'run_id' => $runId,
+            'stage' => 'shopify_metafield_update',
+            'sku' => 'P1599',
+            'variant_gid' => 'gid://shopify/ProductVariant/50',
+            'message' => 'Value is invalid JSON.',
+            'details' => ['exception' => 'UnexpectedValueException'],
+        ]);
+        $logger->shouldReceive('log')->once()->with('warning', 'PO sync issue.', [
+            'run_id' => $runId,
+            'stage' => 'shopify_variant_lookup',
+            'sku' => 'P1',
+            'variant_gid' => null,
+            'message' => 'No match.',
+            'details' => [],
+        ]);
+        Log::shouldReceive('channel')->twice()->with('po_sync')->andReturn($logger);
 
-        $recorder->record($runId, SyncIssueRecorder::STAGE_ORDERWISE_EXPORT, SyncIssueRecorder::SEVERITY_ERROR, 'Export failed.');
+        $recorder = app(SyncIssueRecorder::class);
+        $recorder->record(
+            runId: $runId,
+            stage: SyncIssueRecorder::STAGE_SHOPIFY_METAFIELD_UPDATE,
+            severity: SyncIssueRecorder::SEVERITY_ERROR,
+            message: 'Value is invalid JSON.',
+            details: ['exception' => 'UnexpectedValueException'],
+            sku: 'P1599',
+            variantGid: 'gid://shopify/ProductVariant/50',
+        );
         $recorder->record($runId, SyncIssueRecorder::STAGE_SHOPIFY_VARIANT_LOOKUP, SyncIssueRecorder::SEVERITY_WARNING, 'No match.', sku: 'P1');
-        $recorder->record($otherRunId, SyncIssueRecorder::STAGE_SHOPIFY_SYNC, SyncIssueRecorder::SEVERITY_ERROR, 'Other run failed.');
 
-        $errors = $recorder->errorsForRun($runId);
-
-        $this->assertSame(['Export failed.'], $errors->pluck('message')->all());
+        $this->assertDatabaseCount('po_sync_issues', 2);
     }
 
     private function createRun(): int

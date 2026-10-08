@@ -52,8 +52,4 @@ return [
         'push_enabled' => (bool) env('PO_SYNC_PUSH_SHOPIFY', false),
     ],
 
-    'po_sync' => [
-        'mail_recipients' => array_values(array_filter(array_map('trim', explode(',', (string) env('PO_SYNC_MAIL_RECIPIENTS', ''))))),
-    ],
-
 ];

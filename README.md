@@ -12,14 +12,14 @@ It is a command-line Laravel app. There is no UI and no API; everything runs fro
 |---|---|---|
 | 1 | **Host the app** on a server with PHP 8.3+, MySQL and cron. See [Hosting](#hosting). | Currently runs only on a developer machine. |
 | 2 | **Add the cron entry** for the Laravel scheduler. | The 3-hour schedule does nothing without it. |
-| 3 | **Configure SMTP** (`MAIL_*` in `.env`) and set a real `MAIL_FROM_ADDRESS`. Then run `php artisan orderwise:send-test-mail`. | `MAIL_MAILER=log` right now, so error emails are only written to `storage/logs/laravel.log`. Nothing reaches an inbox. |
-| 4 | **Set `APP_TIMEZONE`** explicitly (it is empty). | "Today" decides which POs are fetched and when a promised date counts as passed. With it empty the app uses the server's PHP timezone, which was UTC locally. |
-| 5 | **Set `APP_ENV=production` and `APP_DEBUG=false`.** | Standard production settings. |
-| 6 | **Rotate the Shopify client secret**, then put the new one in the server `.env`. | The secret and a 24-hour access token appeared in screenshots during development. |
-| 7 | **Remove `SHOPIFY_ADMIN_TOKEN` from `.env`** if it is still there. | No code reads it. The app generates its own token. |
-| 8 | **Decide how OrderWise codes map to Shopify SKUs.** See [Known issue: SKU mismatch](#known-issue-sku-mismatch). | Only 7 of 559 SKUs currently match. This is the main thing limiting real-world value. |
-| 9 | **Confirm the metafield definition** `custom.incoming_purchase_orders` (type JSON, on variants) exists in Shopify admin and is exposed to the storefront/theme as needed. | The app writes the value; it does not create the definition or any theme code. |
-| 10 | **Put the project in git** (it is not a repository yet) and keep `.env` out of it. | No version history exists. |
+| 3 | **Set `APP_TIMEZONE`** explicitly (it is empty). | "Today" decides which POs are fetched and when a promised date counts as passed. With it empty the app uses the server's PHP timezone, which was UTC locally. |
+| 4 | **Set `APP_ENV=production` and `APP_DEBUG=false`.** | Standard production settings. |
+| 5 | **Rotate the Shopify client secret**, then put the new one in the server `.env`. | The secret and a 24-hour access token appeared in screenshots during development. |
+| 6 | **Remove `SHOPIFY_ADMIN_TOKEN` from `.env`** if it is still there. | No code reads it. The app generates its own token. |
+| 7 | **Decide how OrderWise codes map to Shopify SKUs.** See [Known issue: SKU mismatch](#known-issue-sku-mismatch). | Only 7 of 559 SKUs currently match. This is the main thing limiting real-world value. |
+| 8 | **Confirm the metafield definition** `custom.incoming_purchase_orders` (type JSON, on variants) exists in Shopify admin and is exposed to the storefront/theme as needed. | The app writes the value; it does not create the definition or any theme code. |
+| 9 | **Commit and push the project** to `origin` and keep `.env` out of it. | The repository and remote exist, but nothing is committed yet. |
+| 10 | **Decide who checks for errors.** | The app sends no email. Errors are only in the PO sync log and the `po_sync_issues` table. |
 
 ## How it works
 
@@ -29,7 +29,7 @@ Every run of `php artisan orderwise:sync-po` does this:
 2. **Filter.** Drops lines with no outstanding quantity and lines whose supplier promised date is before today.
 3. **Store.** Compares the result with `po_lines` by OrderWise PO line id and records each line as new, updated, removed or unchanged.
 4. **Push to Shopify** (only when `PO_SYNC_PUSH_SHOPIFY=true`). For each SKU it builds the full list of incoming POs, finds the variant by SKU, reads the current metafield value, and replaces it.
-5. **Report.** Writes the run to the PO sync log, records problems in `po_sync_issues`, and emails the recipients if the run had errors.
+5. **Report.** Writes the run to the PO sync log. Every problem is written to the PO sync log and stored in `po_sync_issues`. No email is sent.
 
 ### The OrderWise export
 
@@ -61,7 +61,7 @@ WHERE pol.pol_date_promised >= @since
 ORDER BY poh.poh_datetime DESC, poh.poh_order_number, pol.pol_id;
 ```
 
-The `WHERE` line above is what the export is understood to use now; the rest is the query as last shared. Check the live definition in OrderWise if behaviour looks wrong. If the export's parameters or column names change, the sync fails with a logged error and an email (this happened once during development when `@date_from`/`@date_to` were replaced by `@since`).
+The `WHERE` line above is what the export is understood to use now; the rest is the query as last shared. Check the live definition in OrderWise if behaviour looks wrong. If the export's parameters or column names change, the sync fails with a logged error and a `po_sync_issues` row (this happened once during development when `@date_from`/`@date_to` were replaced by `@since`).
 
 ### What is written to Shopify
 
@@ -94,9 +94,8 @@ The app uses the client credentials grant: it posts `SHOPIFY_CLIENT_ID` and `SHO
 | Command | What it does |
 |---|---|
 | `php artisan orderwise:sync-po` | Runs one full sync. Pushes to Shopify only when `PO_SYNC_PUSH_SHOPIFY=true`. |
-| `php artisan orderwise:send-test-mail` | Sends a clearly marked test error email to `PO_SYNC_MAIL_RECIPIENTS`. Use it to verify SMTP. |
 | `php artisan schedule:list` | Shows the schedule and the next run time. |
-| `php artisan test` | Runs the test suite (34 tests). All HTTP calls are faked; nothing external is touched. |
+| `php artisan test` | Runs the test suite (30 tests). All HTTP calls are faked; nothing external is touched. |
 
 To run a sync without touching Shopify, set `PO_SYNC_PUSH_SHOPIFY=false` for that run.
 
@@ -151,9 +150,7 @@ Notes:
 | `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET` | Shopify app credentials | Secret. Rotate before go-live. |
 | `SHOPIFY_API_VERSION` | Admin API version | `2026-10` |
 | `PO_SYNC_PUSH_SHOPIFY` | `true` writes metafields, `false` only updates the local database | `false` in `.env.example` |
-| `PO_SYNC_MAIL_RECIPIENTS` | Who gets error emails, comma separated | `dev@readyryse.com` locally |
 | `PO_SYNC_LOG_DAYS` | Days of PO sync logs to keep | `14` |
-| `MAIL_*` | SMTP settings | **Not configured. `MAIL_MAILER=log`.** |
 | `DB_*` | MySQL connection | Local database is `ott_po_fetch` |
 
 ## Database tables
@@ -173,16 +170,19 @@ All tables are created by the migrations in `database/migrations`.
 
 `po_sync_issues.severity`:
 
-- `error`: the OrderWise fetch failed, or a Shopify lookup or metafield write failed. These trigger the email.
-- `warning`: a SKU has no matching Shopify variant (or more than one). Recorded once when the SKU first becomes unmatched, not on every run. No email.
+- `error`: the OrderWise fetch failed, or a Shopify lookup or metafield write failed.
+- `warning`: a SKU has no matching Shopify variant (or more than one). Recorded once when the SKU first becomes unmatched, not on every run.
+
+Every row is also written to the PO sync log as a `PO sync issue.` line at the same level, with the run id, stage, SKU, variant id, message and details.
 
 Nothing prunes `po_line_changes`, `variant_metafield_updates` or `po_sync_issues`. They grow slowly, but add a cleanup job if long-term size matters.
 
 ## Error handling and monitoring
 
-- **Email.** One email per run that had errors, sent to `PO_SYNC_MAIL_RECIPIENTS`, listing stage, SKU and message for up to 50 errors. If sending the email itself fails, the sync still completes and the failure is logged.
-- **PO sync log.** `storage/logs/po-sync-YYYY-MM-DD.log`, kept for 14 days. One summary line per run, the unmatched and failed SKU lists, and one line per outstanding PO line.
-- **Application log.** `storage/logs/laravel.log`. Emails land here while `MAIL_MAILER=log`.
+- **No email.** The app does not send mail. Check the log and the `po_sync_issues` table.
+- **PO sync log.** `storage/logs/po-sync-YYYY-MM-DD.log`, kept for 14 days. One summary line per run, the unmatched and failed SKU lists, one `PO sync issue.` line per error or warning, and one line per outstanding PO line.
+- **Issue table.** `po_sync_issues` holds the same errors and warnings as the log, and is not pruned.
+- **Application log.** `storage/logs/laravel.log`, for anything the framework itself reports.
 - **Exit code.** The command exits non-zero when OrderWise fails or any SKU fails to push.
 - **Retries.** Shopify 429 and throttled responses are retried with back-off. Unmatched and failed SKUs are retried on every run.
 
@@ -216,14 +216,12 @@ Options, to be decided:
 
 | File | Responsibility |
 |---|---|
-| `app/Console/Commands/SyncPurchaseOrders.php` | The sync command: orchestrates the run, logging, issue recording and the error email |
-| `app/Console/Commands/SendPoSyncTestMail.php` | Test email command |
+| `app/Console/Commands/SyncPurchaseOrders.php` | The sync command: orchestrates the run, logging and issue recording |
 | `app/Services/OrderWiseClient.php` | OrderWise token and export call |
 | `app/Services/PurchaseOrderSyncService.php` | Filters rows and applies them to `po_lines` and `po_line_changes` |
 | `app/Services/ShopifyClient.php` | Shopify token, GraphQL calls, throttling and retries |
 | `app/Services/ShopifyMetafieldSyncService.php` | Builds the metafield payloads, matches SKUs, writes metafields, records update history |
-| `app/Services/SyncIssueRecorder.php` | Writes to and reads from `po_sync_issues` |
-| `app/Mail/PoSyncIssuesDetected.php`, `resources/views/mail/po-sync/issues-detected.blade.php` | The error email |
+| `app/Services/SyncIssueRecorder.php` | Writes each issue to the PO sync log and to `po_sync_issues` |
 | `routes/console.php` | The 3-hour schedule |
 | `config/services.php` | Maps the environment variables above to config |
 | `tests/Feature` | Tests for each of the above |
